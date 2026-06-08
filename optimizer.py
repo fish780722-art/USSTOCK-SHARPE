@@ -354,6 +354,10 @@ def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.S
     if monthly_returns.empty:
         raise PortfolioError("月報酬率資料為空。")
 
+    monthly_returns = monthly_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    if monthly_returns.empty:
+        raise PortfolioError("月報酬率資料清理後為空。")
+
     zero_volatility = monthly_returns.std(ddof=1)
     zero_volatility = zero_volatility[zero_volatility <= 0]
     if not zero_volatility.empty:
@@ -362,7 +366,7 @@ def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.S
     mean_returns = monthly_returns.mean().to_numpy()
     covariance = monthly_returns.cov().to_numpy()
     diagonal_max = float(np.nanmax(np.diag(covariance)))
-    ridge = max(diagonal_max, 1e-12) * 1e-10
+    ridge = max(diagonal_max, 1e-12) * 1e-8
     covariance = covariance + np.eye(monthly_returns.shape[1]) * ridge
     rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
     asset_count = monthly_returns.shape[1]
@@ -374,26 +378,77 @@ def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.S
             return 1e6
         return -((portfolio_mean - rf_monthly) / portfolio_vol) * np.sqrt(MONTHS_PER_YEAR)
 
-    initial_weights = np.repeat(1 / asset_count, asset_count)
     bounds = tuple((0.0, 1.0) for _ in range(asset_count))
     constraints = ({"type": "eq", "fun": lambda weights: np.sum(weights) - 1.0},)
+    initial_weights = build_initial_weight_guesses(mean_returns, covariance, asset_count)
 
-    result = minimize(
-        negative_sharpe,
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-        options={"maxiter": 1000, "ftol": 1e-12},
-    )
+    best_result = None
+    best_score = np.inf
+    failure_messages = []
+    for guess in initial_weights:
+        result = minimize(
+            negative_sharpe,
+            guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"maxiter": 2000, "ftol": 1e-10},
+        )
+        score = negative_sharpe(result.x)
+        feasible = (
+            np.isfinite(score)
+            and np.all(result.x >= -1e-6)
+            and np.all(result.x <= 1 + 1e-6)
+            and abs(float(np.sum(result.x)) - 1.0) <= 1e-5
+        )
+        if result.success or feasible:
+            if score < best_score:
+                best_score = score
+                best_result = result
+        else:
+            failure_messages.append(str(result.message))
 
-    if not result.success:
-        raise PortfolioError(f"最佳化失敗：{result.message}")
+    if best_result is None:
+        details = sorted(set(failure_messages))
+        detail_text = f"；原因：{' / '.join(details)}" if details else ""
+        raise PortfolioError(f"最佳化失敗：請縮短 ticker 清單、拉長回測期間，或移除高度相關/資料不穩定標的{detail_text}")
 
-    weights = pd.Series(result.x, index=monthly_returns.columns, name="Weight")
+    weights = pd.Series(best_result.x, index=monthly_returns.columns, name="Weight")
     weights = weights.clip(lower=0)
     weights = weights / weights.sum()
     return weights.sort_values(ascending=False)
+
+
+def build_initial_weight_guesses(
+    mean_returns: np.ndarray,
+    covariance: np.ndarray,
+    asset_count: int,
+) -> list[np.ndarray]:
+    guesses = [np.repeat(1 / asset_count, asset_count)]
+
+    for index in range(asset_count):
+        unit = np.zeros(asset_count)
+        unit[index] = 1.0
+        guesses.append(unit)
+
+    positive_returns = np.clip(mean_returns, 0, None)
+    if positive_returns.sum() > 0:
+        guesses.append(positive_returns / positive_returns.sum())
+
+    volatilities = np.sqrt(np.clip(np.diag(covariance), 1e-12, None))
+    inverse_vol = 1 / volatilities
+    guesses.append(inverse_vol / inverse_vol.sum())
+
+    unique_guesses = []
+    for guess in guesses:
+        clean_guess = np.clip(np.asarray(guess, dtype=float), 0, 1)
+        total = clean_guess.sum()
+        if total <= 0:
+            continue
+        clean_guess = clean_guess / total
+        if not any(np.allclose(clean_guess, existing, atol=1e-10) for existing in unique_guesses):
+            unique_guesses.append(clean_guess)
+    return unique_guesses
 
 
 def calculate_portfolio_performance(
