@@ -137,16 +137,26 @@ def build_monthly_returns_table(result) -> pd.DataFrame:
     return table
 
 
-def build_price_ranges_table(result) -> pd.DataFrame:
+def build_ignored_tickers_table(result) -> pd.DataFrame:
     rows = []
-    for ticker, (start_date, end_date) in result.price_ranges.items():
-        rows.append(
-            {
-                "Ticker": ticker,
-                "有效價格起日": start_date.strftime("%Y-%m-%d"),
-                "有效價格迄日": end_date.strftime("%Y-%m-%d"),
-            }
-        )
+    for ticker in result.ignored_tickers:
+        if ticker in result.price_ranges:
+            start_date, end_date = result.price_ranges[ticker]
+            rows.append(
+                {
+                    "Ticker": ticker,
+                    "有效價格起日": start_date.strftime("%Y-%m-%d"),
+                    "有效價格迄日": end_date.strftime("%Y-%m-%d"),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "Ticker": ticker,
+                    "有效價格起日": "無可用價格",
+                    "有效價格迄日": "無可用價格",
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -275,10 +285,10 @@ if run_button:
         st.caption(f"有效候選標的數：{len(result.selection_table)}；進入最佳化標的數：{len(result.selected_tickers)}")
         ignored_text = ", ".join(result.ignored_tickers) if result.ignored_tickers else "無"
         st.caption(f"無價格或資料不足而忽略的標的：{ignored_text}")
-        price_ranges_table = build_price_ranges_table(result)
-        if not price_ranges_table.empty:
+        ignored_tickers_table = build_ignored_tickers_table(result)
+        if not ignored_tickers_table.empty:
             st.dataframe(
-                price_ranges_table,
+                ignored_tickers_table,
                 hide_index=True,
                 use_container_width=True,
             )
