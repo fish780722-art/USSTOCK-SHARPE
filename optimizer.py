@@ -157,6 +157,25 @@ def fetch_latest_tbill_rate(default_rate: float = 0.0368) -> tuple[float, str]:
         return default_rate, "預設值 3.68%；無法自動取得 ^IRX"
 
 
+def fetch_average_tbill_rate(
+    start_date: date,
+    end_date: date,
+    default_rate: float = 0.0368,
+) -> tuple[float, str]:
+    try:
+        prices = download_adjusted_prices(["^IRX"], start_date=start_date, end_date=end_date)
+        monthly_rates = prices["^IRX"].resample("ME").last().dropna() / 100
+        if monthly_rates.empty:
+            raise PortfolioError("無可用 ^IRX 月資料。")
+
+        rate = float(monthly_rates.mean())
+        first_month = monthly_rates.index[0].strftime("%Y-%m")
+        last_month = monthly_rates.index[-1].strftime("%Y-%m")
+        return rate, f"資料來源：Yahoo Finance ^IRX 13-week T-bill，期間平均 {first_month} ~ {last_month}"
+    except Exception:
+        return default_rate, "資料來源：預設值 3.68%；無法自動取得回測期間平均 ^IRX"
+
+
 def download_adjusted_prices(
     tickers: list[str],
     start_date: date | datetime | str,
@@ -341,7 +360,7 @@ def calculate_portfolio_performance(
     years = len(portfolio_returns) / MONTHS_PER_YEAR
     total_return = float(equity_curve.iloc[-1] / initial_capital - 1)
     cagr = float((equity_curve.iloc[-1] / initial_capital) ** (1 / years) - 1)
-    annual_return = float((1 + portfolio_returns.mean()) ** MONTHS_PER_YEAR - 1)
+    annual_return = float(portfolio_returns.mean() * MONTHS_PER_YEAR)
     volatility = float(portfolio_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
     rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
     drawdown = equity_curve / equity_curve.cummax() - 1
@@ -378,7 +397,7 @@ def calculate_single_asset_performance(
     years = len(clean_returns) / MONTHS_PER_YEAR
     total_return = float(equity_curve.iloc[-1] / initial_capital - 1)
     cagr = float((equity_curve.iloc[-1] / initial_capital) ** (1 / years) - 1)
-    annual_return = float((1 + clean_returns.mean()) ** MONTHS_PER_YEAR - 1)
+    annual_return = float(clean_returns.mean() * MONTHS_PER_YEAR)
     volatility = float(clean_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
     rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
     drawdown = equity_curve / equity_curve.cummax() - 1

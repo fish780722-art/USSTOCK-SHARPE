@@ -7,12 +7,13 @@
 - 輸入自訂美股 ticker 清單
 - 可上傳 ticker CSV，預設讀取 `ticker` / `symbol` 欄位，若沒有則讀第一欄
 - 回測期間可選近一年、近三年、近五年、近十年、自訂月份，預設近十年
-- 年化無風險利率預設抓取 Yahoo Finance `^IRX` 13 WEEK TREASURY BILL，仍可自行調整
+- 年化無風險利率預設抓取回測期間平均 Yahoo Finance `^IRX` 13-week T-bill，較接近 Portfolio Visualizer 的歷史 risk-free 口徑，仍可自行調整
 - 可自訂初始投資資金
 - 可輸入比較大盤標的，例如 `SPY`、`QQQ`、`2330`、`0050`，並提供常見 ETF/台股模糊搜尋建議
 - 美股與台股標的可混用；台股數字代號會自動嘗試 Yahoo Finance 的 `.TW`，若失敗再嘗試 `.TWO`
 - 使用 adjusted price 計算月報酬率
 - 以左右比較表輸出投組與比較標的的初始投資資金、終期投資資金、CAGR、年化報酬率、年化標準差、最大回撤、Sharpe ratio
+- 年化報酬率採 Portfolio Visualizer 的 Expected Return 口徑：月報酬率算術平均乘以 12
 - 顯示最佳持股比重、權重圖表、投組淨值曲線
 - 投組淨值曲線會同時繪製比較標的，並以紅線顯示
 - 月報酬率表格包含各標的、投組、比較標的；負值以紅色呈現

@@ -7,7 +7,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from optimizer import PortfolioError, custom_month_range, fetch_latest_tbill_rate, run_optimization
+from optimizer import (
+    PortfolioError,
+    custom_month_range,
+    fetch_average_tbill_rate,
+    period_to_full_month_range,
+    run_optimization,
+)
 
 
 st.set_page_config(
@@ -132,13 +138,11 @@ def build_monthly_returns_table(result) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60 * 60)
-def get_default_rf_rate() -> tuple[float, str]:
-    return fetch_latest_tbill_rate()
+def get_default_rf_rate(start_date, end_date) -> tuple[float, str]:
+    return fetch_average_tbill_rate(start_date, end_date)
 
 
 st.title("美股 Sharpe 最大化投組")
-
-default_rf_rate, rf_source = get_default_rf_rate()
 
 with st.sidebar:
     st.header("參數")
@@ -185,6 +189,15 @@ with st.sidebar:
             end_month = st.selectbox("結束月", months, index=5)
         custom_selection = (start_year, start_month, end_year, end_month)
 
+    try:
+        if period == "自訂" and custom_selection is not None:
+            rf_start_date, rf_end_date = custom_month_range(*custom_selection)
+        else:
+            rf_start_date, rf_end_date = period_to_full_month_range(period)
+        default_rf_rate, rf_source = get_default_rf_rate(rf_start_date, rf_end_date)
+    except PortfolioError as exc:
+        default_rf_rate, rf_source = 0.0368, f"資料來源：預設值 3.68%；{exc}"
+
     initial_capital = st.number_input(
         "初始投資資金",
         min_value=1.0,
@@ -198,7 +211,7 @@ with st.sidebar:
         value=round(default_rf_rate * 100, 3),
         step=0.05,
     )
-    st.caption(f"預設來源：{rf_source}")
+    st.caption(rf_source)
     run_button = st.button("開始最佳化", type="primary", use_container_width=True)
 
 st.caption("價格資料由 yfinance 取得，使用 adjusted price 計算月報酬率。")
