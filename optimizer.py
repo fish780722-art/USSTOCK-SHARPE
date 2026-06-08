@@ -27,6 +27,7 @@ class OptimizationResult:
     metrics: dict[str, float]
     benchmark_ticker: str | None
     benchmark_returns: pd.Series | None
+    benchmark_equity_curve: pd.Series | None
     benchmark_metrics: dict[str, float] | None
     start_date: date
     end_date: date
@@ -117,6 +118,13 @@ def parse_optional_ticker(raw_ticker: str | None) -> str | None:
     return None
 
 
+def ticker_download_candidates(ticker: str) -> list[str]:
+    clean = ticker.strip().upper()
+    if clean.isdigit() and 4 <= len(clean) <= 6:
+        return [f"{clean}.TW", f"{clean}.TWO"]
+    return [clean]
+
+
 def custom_month_range(start_year: int, start_month: int, end_year: int, end_month: int) -> tuple[date, date]:
     start = month_start(start_year, start_month)
     end = month_end(end_year, end_month)
@@ -163,8 +171,9 @@ def download_adjusted_prices(
     if isinstance(end_date, date):
         download_end = end_date + timedelta(days=1)
 
+    primary_download_tickers = [ticker_download_candidates(ticker)[0] for ticker in tickers]
     raw = yf.download(
-        tickers=tickers,
+        tickers=primary_download_tickers,
         start=start_date,
         end=download_end,
         auto_adjust=True,
@@ -176,25 +185,35 @@ def download_adjusted_prices(
     if raw.empty:
         raise PortfolioError("yfinance 未回傳價格資料，請確認 ticker 或日期區間。")
 
-    prices = _extract_close_prices(raw, tickers)
+    downloaded_prices = _extract_close_prices(raw, primary_download_tickers)
+    prices = pd.DataFrame(index=downloaded_prices.index)
+    for ticker, download_ticker in zip(tickers, primary_download_tickers):
+        if download_ticker in downloaded_prices:
+            prices[ticker] = downloaded_prices[download_ticker]
+
     missing = sorted(set(tickers) - set(prices.columns))
     if missing:
         fallback_prices = []
         for ticker in missing:
-            single_raw = yf.download(
-                tickers=ticker,
-                start=start_date,
-                end=download_end,
-                auto_adjust=True,
-                progress=False,
-                group_by="column",
-                threads=False,
-            )
-            if not single_raw.empty:
+            for download_ticker in ticker_download_candidates(ticker):
+                single_raw = yf.download(
+                    tickers=download_ticker,
+                    start=start_date,
+                    end=download_end,
+                    auto_adjust=True,
+                    progress=False,
+                    group_by="column",
+                    threads=False,
+                )
+                if single_raw.empty:
+                    continue
                 try:
-                    fallback_prices.append(_extract_close_prices(single_raw, [ticker]))
+                    single_prices = _extract_close_prices(single_raw, [download_ticker])
                 except PortfolioError:
-                    pass
+                    continue
+                if download_ticker in single_prices:
+                    fallback_prices.append(single_prices[[download_ticker]].rename(columns={download_ticker: ticker}))
+                    break
 
         if fallback_prices:
             prices = pd.concat([prices, *fallback_prices], axis=1)
@@ -350,7 +369,7 @@ def calculate_single_asset_performance(
     monthly_returns: pd.Series,
     rf_annual: float,
     initial_capital: float,
-) -> tuple[pd.Series, dict[str, float]]:
+) -> tuple[pd.Series, pd.Series, dict[str, float]]:
     clean_returns = monthly_returns.dropna()
     if len(clean_returns) < 12:
         raise PortfolioError("比較大盤標的的月報酬率資料少於 12 期。")
@@ -380,7 +399,7 @@ def calculate_single_asset_performance(
         "sharpe": sharpe,
         "total_return": total_return,
     }
-    return clean_returns, metrics
+    return clean_returns, equity_curve, metrics
 
 
 def run_optimization(
@@ -422,9 +441,10 @@ def run_optimization(
         initial_capital=initial_capital,
     )
     benchmark_returns = None
+    benchmark_equity_curve = None
     benchmark_metrics = None
     if benchmark:
-        benchmark_returns, benchmark_metrics = calculate_single_asset_performance(
+        benchmark_returns, benchmark_equity_curve, benchmark_metrics = calculate_single_asset_performance(
             all_monthly_returns[benchmark],
             rf_annual=rf_annual,
             initial_capital=initial_capital,
@@ -438,6 +458,7 @@ def run_optimization(
         metrics=metrics,
         benchmark_ticker=benchmark,
         benchmark_returns=benchmark_returns,
+        benchmark_equity_curve=benchmark_equity_curve,
         benchmark_metrics=benchmark_metrics,
         start_date=start,
         end_date=end,

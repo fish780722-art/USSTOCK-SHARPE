@@ -4,6 +4,7 @@ from difflib import get_close_matches
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from optimizer import PortfolioError, custom_month_range, fetch_latest_tbill_rate, run_optimization
@@ -47,6 +48,12 @@ COMMON_BENCHMARKS = [
     "XLF",
     "XLV",
     "XLY",
+    "0050",
+    "0056",
+    "00878",
+    "2330",
+    "2317",
+    "2454",
 ]
 
 
@@ -95,28 +102,23 @@ def negative_red_style(value: float) -> str:
 
 
 def build_analysis_table(result) -> pd.DataFrame:
-    rows = [
-        ("[投組] 初始投資資金", format_money(result.metrics["initial_capital"])),
-        ("[投組] 終期投資資金", format_money(result.metrics["ending_capital"])),
-        ("[投組] CAGR", format_percent(result.metrics["cagr"])),
-        ("[投組] 年化報酬率", format_percent(result.metrics["annual_return"])),
-        ("[投組] 年化標準差", format_percent(result.metrics["volatility"])),
-        ("[投組] 最大回撤 %", format_percent(result.metrics["max_drawdown"])),
-        ("[投組] SHARPE 指數", f"{result.metrics['sharpe']:.2f}"),
+    benchmark_label = result.benchmark_ticker or "比較大盤"
+    metric_rows = [
+        ("初始投資資金", "initial_capital", format_money),
+        ("終期投資資金", "ending_capital", format_money),
+        ("CAGR", "cagr", format_percent),
+        ("年化報酬率", "annual_return", format_percent),
+        ("年化標準差", "volatility", format_percent),
+        ("最大回撤 %", "max_drawdown", format_percent),
+        ("SHARPE 指數", "sharpe", lambda value: f"{value:.2f}"),
     ]
-    if result.benchmark_ticker and result.benchmark_metrics:
-        rows.extend(
-            [
-                (f"[{result.benchmark_ticker}] 初始投資資金", format_money(result.benchmark_metrics["initial_capital"])),
-                (f"[{result.benchmark_ticker}] 終期投資資金", format_money(result.benchmark_metrics["ending_capital"])),
-                (f"[{result.benchmark_ticker}] CAGR", format_percent(result.benchmark_metrics["cagr"])),
-                (f"[{result.benchmark_ticker}] 年化報酬率", format_percent(result.benchmark_metrics["annual_return"])),
-                (f"[{result.benchmark_ticker}] 年化標準差", format_percent(result.benchmark_metrics["volatility"])),
-                (f"[{result.benchmark_ticker}] 最大回撤 %", format_percent(result.benchmark_metrics["max_drawdown"])),
-                (f"[{result.benchmark_ticker}] SHARPE 指數", f"{result.benchmark_metrics['sharpe']:.2f}"),
-            ]
-        )
-    return pd.DataFrame(rows, columns=["名稱", "數據"])
+    rows = []
+    for name, key, formatter in metric_rows:
+        benchmark_value = ""
+        if result.benchmark_metrics:
+            benchmark_value = formatter(result.benchmark_metrics[key])
+        rows.append((name, formatter(result.metrics[key]), benchmark_value))
+    return pd.DataFrame(rows, columns=["名稱", "投組", benchmark_label])
 
 
 def build_monthly_returns_table(result) -> pd.DataFrame:
@@ -153,7 +155,7 @@ with st.sidebar:
     benchmark_query = st.text_input(
         "比較大盤標的",
         value="SPY",
-        help="例如 SPY、QQQ、VTI；可自行輸入 ticker。",
+        help="例如 SPY、QQQ、VTI、2330、0050；台股數字代號會自動嘗試 .TW 與 .TWO。",
     )
     suggestions = benchmark_suggestions(benchmark_query)
     benchmark_choice = benchmark_query.strip().upper()
@@ -264,10 +266,27 @@ if run_button:
             st.plotly_chart(weight_fig, use_container_width=True)
 
         st.subheader("投組淨值曲線")
-        equity_df = result.equity_curve.rename("Portfolio Value").reset_index()
-        equity_df.columns = ["Date", "Portfolio Value"]
-        equity_fig = px.line(equity_df, x="Date", y="Portfolio Value")
-        equity_fig.update_layout(yaxis_title="Portfolio Value", xaxis_title="")
+        equity_fig = go.Figure()
+        equity_fig.add_trace(
+            go.Scatter(
+                x=result.equity_curve.index,
+                y=result.equity_curve.values,
+                mode="lines",
+                name="投組",
+                line=dict(color="#1f77b4", width=2),
+            )
+        )
+        if result.benchmark_ticker and result.benchmark_equity_curve is not None:
+            equity_fig.add_trace(
+                go.Scatter(
+                    x=result.benchmark_equity_curve.index,
+                    y=result.benchmark_equity_curve.values,
+                    mode="lines",
+                    name=result.benchmark_ticker,
+                    line=dict(color="red", width=2),
+                )
+            )
+        equity_fig.update_layout(yaxis_title="Portfolio Value", xaxis_title="", legend_title_text="")
         st.plotly_chart(equity_fig, use_container_width=True)
 
         with st.expander("月報酬率資料"):
