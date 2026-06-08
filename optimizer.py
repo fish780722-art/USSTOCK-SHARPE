@@ -32,6 +32,8 @@ class OptimizationResult:
     benchmark_metrics: dict[str, float] | None
     ignored_tickers: list[str]
     price_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]]
+    optimizer_engine: str
+    optimizer_note: str
     start_date: date
     end_date: date
 
@@ -350,7 +352,11 @@ def filter_monthly_returns(
     return filtered
 
 
-def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.Series:
+def optimize_max_sharpe(
+    monthly_returns: pd.DataFrame,
+    rf_annual: float,
+    optimizer_engine: str = "ffn-compatible",
+) -> tuple[pd.Series, str, str]:
     if monthly_returns.empty:
         raise PortfolioError("月報酬率資料為空。")
 
@@ -363,6 +369,36 @@ def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.S
     if not zero_volatility.empty:
         raise PortfolioError(f"以下 ticker 月報酬率波動度為 0，無法計算 Sharpe：{', '.join(zero_volatility.index)}")
 
+    if optimizer_engine == "ffn-compatible":
+        try:
+            weights = optimize_with_ffn(monthly_returns)
+            return weights, "ffn-compatible", "使用 ffn.core.calc_mean_var_weights；權重最佳化 rf=0，對齊原始 Python。"
+        except Exception as exc:
+            fallback_weights = optimize_stable_max_sharpe(monthly_returns, rf_annual)
+            return fallback_weights, "stable-fallback", f"ffn 最佳化失敗，已改用穩定 fallback；ffn 錯誤：{exc}"
+
+    weights = optimize_stable_max_sharpe(monthly_returns, rf_annual)
+    return weights, "stable", "使用本工具穩定最大 Sharpe 模式。"
+
+
+def optimize_with_ffn(monthly_returns: pd.DataFrame) -> pd.Series:
+    import ffn
+
+    weights = ffn.core.calc_mean_var_weights(
+        monthly_returns,
+        weight_bounds=(0.0, 1.0),
+        rf=0.0,
+        covar_method="ledoit-wolf",
+        options={"maxiter": 2000, "ftol": 1e-10},
+    )
+    weights = weights.clip(lower=0)
+    if weights.sum() <= 0:
+        raise PortfolioError("ffn 回傳的權重總和小於等於 0。")
+    weights = weights / weights.sum()
+    return weights.sort_values(ascending=False)
+
+
+def optimize_stable_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.Series:
     mean_returns = monthly_returns.mean().to_numpy()
     covariance = monthly_returns.cov().to_numpy()
     diagonal_max = float(np.nanmax(np.diag(covariance)))
@@ -584,6 +620,7 @@ def run_optimization(
     custom_start: date | None = None,
     custom_end: date | None = None,
     benchmark_ticker: str | None = "SPY",
+    optimizer_engine: str = "ffn-compatible",
 ) -> OptimizationResult:
     tickers = parse_tickers(raw_tickers)
     benchmark = parse_optional_ticker(benchmark_ticker)
@@ -623,7 +660,11 @@ def run_optimization(
         raise PortfolioError(f"可用投組 ticker 少於 2 個，無法進行投組最佳化{ignored_text}。")
 
     monthly_returns = all_monthly_returns[valid_tickers]
-    weights = optimize_max_sharpe(monthly_returns, rf_annual)
+    weights, resolved_engine, optimizer_note = optimize_max_sharpe(
+        monthly_returns,
+        rf_annual,
+        optimizer_engine=optimizer_engine,
+    )
     portfolio_returns, equity_curve, metrics = calculate_portfolio_performance(
         monthly_returns=monthly_returns,
         weights=weights,
@@ -654,6 +695,8 @@ def run_optimization(
         benchmark_metrics=benchmark_metrics,
         ignored_tickers=ignored_tickers,
         price_ranges=price_ranges,
+        optimizer_engine=resolved_engine,
+        optimizer_note=optimizer_note,
         start_date=start,
         end_date=end,
     )

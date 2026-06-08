@@ -4,4 +4,4 @@ numpy>=1.24
 yfinance>=0.2.40
 scipy>=1.10
 plotly>=5.20
-
+ffn>=1.1.5

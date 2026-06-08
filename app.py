@@ -182,6 +182,13 @@ with st.sidebar:
             options=suggestions,
             index=0 if benchmark_query.strip().upper() not in suggestions else suggestions.index(benchmark_query.strip().upper()),
         )
+    optimizer_engine = st.selectbox(
+        "最佳化引擎",
+        options=["ffn-compatible", "stable"],
+        index=0,
+        format_func=lambda value: "原始 Python / ffn 相容" if value == "ffn-compatible" else "高維穩定模式",
+        help="ffn 相容模式會使用 ffn.core.calc_mean_var_weights，盡量對齊你原始 Python 的權重。",
+    )
     period = st.selectbox(
         "回測期間",
         options=["近一年", "近三年", "近五年", "近十年", "自訂"],
@@ -247,6 +254,7 @@ if run_button:
                 custom_start=custom_start,
                 custom_end=custom_end,
                 benchmark_ticker=benchmark_choice,
+                optimizer_engine=optimizer_engine,
             )
 
         weights_table = build_weights_table(result.weights)
@@ -262,6 +270,7 @@ if run_button:
         )
 
         st.subheader("資料品質")
+        st.caption(f"最佳化引擎：{result.optimizer_engine}。{result.optimizer_note}")
         ignored_text = ", ".join(result.ignored_tickers) if result.ignored_tickers else "無"
         st.caption(f"無價格或資料不足而忽略的標的：{ignored_text}")
         price_ranges_table = build_price_ranges_table(result)
