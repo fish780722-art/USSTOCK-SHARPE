@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from difflib import get_close_matches
+from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import requests
 
 from optimizer import (
     PortfolioError,
@@ -13,6 +15,7 @@ from optimizer import (
     fetch_average_tbill_rate,
     period_to_full_month_range,
     run_optimization,
+    ticker_download_candidates,
 )
 
 
@@ -28,14 +31,117 @@ def format_percent(value: float) -> str:
 
 
 def build_weights_table(weights: pd.Series) -> pd.DataFrame:
+    ticker_names = get_ticker_names(list(weights.index))
     table = pd.DataFrame(
         {
-            "Ticker": weights.index,
+            "Ticker": [format_ticker_with_name(ticker, ticker_names.get(ticker)) for ticker in weights.index],
             "Weight": weights.values,
             "Weight (%)": (weights.values * 100).round(2),
         }
     )
     return table
+
+
+@st.cache_data(ttl=24 * 60 * 60)
+def get_ticker_names(tickers: list[str]) -> dict[str, str]:
+    names = {}
+    for ticker in tickers:
+        names[ticker] = fetch_ticker_name(ticker)
+    return names
+
+
+def fetch_ticker_name(ticker: str) -> str:
+    if is_taiwan_numeric_ticker(ticker):
+        name = fetch_taiwan_chinese_name(ticker)
+        if name:
+            return name
+    for yahoo_ticker in ticker_download_candidates(ticker):
+        name = fetch_yahoo_quote_name(yahoo_ticker) or fetch_yfinance_ticker_name(yahoo_ticker)
+        if name:
+            return name
+    return ""
+
+
+def is_taiwan_numeric_ticker(ticker: str) -> bool:
+    return ticker.isdigit() and 4 <= len(ticker) <= 6
+
+
+def fetch_taiwan_chinese_name(ticker: str) -> str:
+    return fetch_taiwan_name_maps().get(ticker, "")
+
+
+@st.cache_data(ttl=24 * 60 * 60)
+def fetch_taiwan_name_maps() -> dict[str, str]:
+    names = {
+        "0050": "元大台灣50",
+        "0056": "元大高股息",
+        "006208": "富邦台50",
+        "00878": "國泰永續高股息",
+        "00919": "群益台灣精選高息",
+        "00929": "復華台灣科技優息",
+    }
+    sources = [
+        (
+            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+            "公司代號",
+            "公司簡稱",
+            "公司名稱",
+        ),
+        (
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O",
+            "SecuritiesCompanyCode",
+            "CompanyAbbreviation",
+            "CompanyName",
+        ),
+    ]
+    for url, code_key, short_name_key, full_name_key in sources:
+        try:
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            response.raise_for_status()
+            rows = response.json()
+        except Exception:
+            continue
+        for row in rows:
+            code = str(row.get(code_key, "")).strip()
+            short_name = str(row.get(short_name_key, "")).strip()
+            full_name = str(row.get(full_name_key, "")).strip()
+            if code and short_name:
+                names[code] = short_name
+            elif code and full_name:
+                names[code] = full_name
+    return names
+
+
+def fetch_yahoo_quote_name(yahoo_ticker: str) -> str:
+    encoded_ticker = quote(yahoo_ticker, safe="")
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={encoded_ticker}"
+    try:
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        response.raise_for_status()
+        result = response.json().get("quoteResponse", {}).get("result", [])
+    except Exception:
+        return ""
+    if not result:
+        return ""
+    quote_data = result[0]
+    return quote_data.get("longName") or quote_data.get("shortName") or quote_data.get("displayName") or ""
+
+
+def fetch_yfinance_ticker_name(yahoo_ticker: str) -> str:
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(yahoo_ticker).get_info()
+    except Exception:
+        return ""
+    return info.get("longName") or info.get("shortName") or info.get("displayName") or ""
+
+
+def format_ticker_with_name(ticker: str, name: str | None) -> str:
+    clean_name = str(name).strip() if name else ""
+    if not clean_name:
+        return ticker
+    return f"{ticker} ({clean_name})"
 
 
 COMMON_BENCHMARKS = [
