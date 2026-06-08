@@ -182,12 +182,13 @@ with st.sidebar:
             options=suggestions,
             index=0 if benchmark_query.strip().upper() not in suggestions else suggestions.index(benchmark_query.strip().upper()),
         )
-    optimizer_engine = st.selectbox(
-        "最佳化引擎",
-        options=["ffn-compatible", "stable"],
-        index=0,
-        format_func=lambda value: "原始 Python / ffn 相容" if value == "ffn-compatible" else "高維穩定模式",
-        help="ffn 相容模式會使用 ffn.core.calc_mean_var_weights，盡量對齊你原始 Python 的權重。",
+    top_n = st.number_input(
+        "抽取前幾名",
+        min_value=2,
+        max_value=1000,
+        value=100,
+        step=10,
+        help="先從有效標的中抽取單股 Sharpe 最高的前 N 名，再進行投組最佳化。",
     )
     period = st.selectbox(
         "回測期間",
@@ -254,7 +255,7 @@ if run_button:
                 custom_start=custom_start,
                 custom_end=custom_end,
                 benchmark_ticker=benchmark_choice,
-                optimizer_engine=optimizer_engine,
+                top_n=int(top_n),
             )
 
         weights_table = build_weights_table(result.weights)
@@ -270,7 +271,8 @@ if run_button:
         )
 
         st.subheader("資料品質")
-        st.caption(f"最佳化引擎：{result.optimizer_engine}。{result.optimizer_note}")
+        st.caption(result.optimizer_note)
+        st.caption(f"有效候選標的數：{len(result.selection_table)}；進入最佳化標的數：{len(result.selected_tickers)}")
         ignored_text = ", ".join(result.ignored_tickers) if result.ignored_tickers else "無"
         st.caption(f"無價格或資料不足而忽略的標的：{ignored_text}")
         price_ranges_table = build_price_ranges_table(result)
@@ -280,6 +282,12 @@ if run_button:
                 hide_index=True,
                 use_container_width=True,
             )
+        with st.expander("單股 Sharpe 排名"):
+            ranking = result.selection_table.copy()
+            ranking["單股 Sharpe"] = ranking["單股 Sharpe"].round(2)
+            ranking["年化報酬率"] = (ranking["年化報酬率"] * 100).round(2)
+            ranking["年化標準差"] = (ranking["年化標準差"] * 100).round(2)
+            st.dataframe(ranking, hide_index=True, use_container_width=True)
 
         left, right = st.columns([1, 1])
         with left:

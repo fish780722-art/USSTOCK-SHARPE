@@ -32,7 +32,8 @@ class OptimizationResult:
     benchmark_metrics: dict[str, float] | None
     ignored_tickers: list[str]
     price_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]]
-    optimizer_engine: str
+    selected_tickers: list[str]
+    selection_table: pd.DataFrame
     optimizer_note: str
     start_date: date
     end_date: date
@@ -355,8 +356,7 @@ def filter_monthly_returns(
 def optimize_max_sharpe(
     monthly_returns: pd.DataFrame,
     rf_annual: float,
-    optimizer_engine: str = "ffn-compatible",
-) -> tuple[pd.Series, str, str]:
+) -> pd.Series:
     if monthly_returns.empty:
         raise PortfolioError("月報酬率資料為空。")
 
@@ -369,36 +369,6 @@ def optimize_max_sharpe(
     if not zero_volatility.empty:
         raise PortfolioError(f"以下 ticker 月報酬率波動度為 0，無法計算 Sharpe：{', '.join(zero_volatility.index)}")
 
-    if optimizer_engine == "ffn-compatible":
-        try:
-            weights = optimize_with_ffn(monthly_returns)
-            return weights, "ffn-compatible", "使用 ffn.core.calc_mean_var_weights；權重最佳化 rf=0，對齊原始 Python。"
-        except Exception as exc:
-            fallback_weights = optimize_stable_max_sharpe(monthly_returns, rf_annual)
-            return fallback_weights, "stable-fallback", f"ffn 最佳化失敗，已改用穩定 fallback；ffn 錯誤：{exc}"
-
-    weights = optimize_stable_max_sharpe(monthly_returns, rf_annual)
-    return weights, "stable", "使用本工具穩定最大 Sharpe 模式。"
-
-
-def optimize_with_ffn(monthly_returns: pd.DataFrame) -> pd.Series:
-    import ffn
-
-    weights = ffn.core.calc_mean_var_weights(
-        monthly_returns,
-        weight_bounds=(0.0, 1.0),
-        rf=0.0,
-        covar_method="ledoit-wolf",
-        options={"maxiter": 2000, "ftol": 1e-10},
-    )
-    weights = weights.clip(lower=0)
-    if weights.sum() <= 0:
-        raise PortfolioError("ffn 回傳的權重總和小於等於 0。")
-    weights = weights / weights.sum()
-    return weights.sort_values(ascending=False)
-
-
-def optimize_stable_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.Series:
     mean_returns = monthly_returns.mean().to_numpy()
     covariance = monthly_returns.cov().to_numpy()
     diagonal_max = float(np.nanmax(np.diag(covariance)))
@@ -457,6 +427,49 @@ def optimize_stable_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) 
     weights = weights.clip(lower=0)
     weights = weights / weights.sum()
     return weights.sort_values(ascending=False)
+
+
+def rank_tickers_by_single_asset_sharpe(
+    monthly_returns: pd.DataFrame,
+    rf_annual: float,
+) -> pd.DataFrame:
+    rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
+    rows = []
+    for ticker in monthly_returns.columns:
+        returns = monthly_returns[ticker].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(returns) != len(monthly_returns):
+            continue
+        volatility_monthly = returns.std(ddof=1)
+        if volatility_monthly <= 0 or not np.isfinite(volatility_monthly):
+            continue
+        sharpe = (returns.mean() - rf_monthly) / volatility_monthly * np.sqrt(MONTHS_PER_YEAR)
+        annual_return = returns.mean() * MONTHS_PER_YEAR
+        annual_volatility = volatility_monthly * np.sqrt(MONTHS_PER_YEAR)
+        rows.append(
+            {
+                "Ticker": ticker,
+                "單股 Sharpe": float(sharpe),
+                "年化報酬率": float(annual_return),
+                "年化標準差": float(annual_volatility),
+            }
+        )
+    if not rows:
+        raise PortfolioError("沒有符合資料完整且波動正常條件的標的。")
+    return pd.DataFrame(rows).sort_values("單股 Sharpe", ascending=False).reset_index(drop=True)
+
+
+def select_top_sharpe_tickers(
+    monthly_returns: pd.DataFrame,
+    rf_annual: float,
+    top_n: int,
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
+    if top_n <= 0:
+        raise PortfolioError("抽取前幾名必須大於 0。")
+    ranking = rank_tickers_by_single_asset_sharpe(monthly_returns, rf_annual)
+    selected = ranking.head(min(top_n, len(ranking)))["Ticker"].tolist()
+    if len(selected) < 2:
+        raise PortfolioError("抽取後可用標的少於 2 個，無法進行投組最佳化。")
+    return monthly_returns[selected], selected, ranking
 
 
 def build_initial_weight_guesses(
@@ -620,7 +633,7 @@ def run_optimization(
     custom_start: date | None = None,
     custom_end: date | None = None,
     benchmark_ticker: str | None = "SPY",
-    optimizer_engine: str = "ffn-compatible",
+    top_n: int = 100,
 ) -> OptimizationResult:
     tickers = parse_tickers(raw_tickers)
     benchmark = parse_optional_ticker(benchmark_ticker)
@@ -659,12 +672,10 @@ def run_optimization(
         ignored_text = f"；已忽略：{', '.join(ignored_tickers)}" if ignored_tickers else ""
         raise PortfolioError(f"可用投組 ticker 少於 2 個，無法進行投組最佳化{ignored_text}。")
 
-    monthly_returns = all_monthly_returns[valid_tickers]
-    weights, resolved_engine, optimizer_note = optimize_max_sharpe(
-        monthly_returns,
-        rf_annual,
-        optimizer_engine=optimizer_engine,
-    )
+    candidate_returns = all_monthly_returns[valid_tickers]
+    monthly_returns, selected_tickers, selection_table = select_top_sharpe_tickers(candidate_returns, rf_annual, top_n)
+    weights = optimize_max_sharpe(monthly_returns, rf_annual)
+    optimizer_note = f"先以單股 Sharpe 排名抽取前 {len(selected_tickers)} 名，再使用高維穩定最大 Sharpe 模式。"
     portfolio_returns, equity_curve, metrics = calculate_portfolio_performance(
         monthly_returns=monthly_returns,
         weights=weights,
@@ -695,7 +706,8 @@ def run_optimization(
         benchmark_metrics=benchmark_metrics,
         ignored_tickers=ignored_tickers,
         price_ranges=price_ranges,
-        optimizer_engine=resolved_engine,
+        selected_tickers=selected_tickers,
+        selection_table=selection_table,
         optimizer_note=optimizer_note,
         start_date=start,
         end_date=end,
