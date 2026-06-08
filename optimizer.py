@@ -128,6 +128,8 @@ def ticker_download_candidates(ticker: str) -> list[str]:
     clean = ticker.strip().upper()
     if is_taiwan_ticker(clean):
         return [f"{clean}.TW", f"{clean}.TWO"]
+    if "." in clean:
+        return [clean, clean.replace(".", "-")]
     return [clean]
 
 
