@@ -1,0 +1,10 @@
+利用我提供的美股資料庫
+報酬率資料以月報酬率為主
+分析部分著重在SHARPE指數最大化
+資料來源可利用ffn或yfinance
+
+利用Portfolio Optimization來分析這個組合內的最大夏普指數的成分股&持股比重
+可參考以下網址
+https://www.portfoliovisualizer.com/optimize-portfolio
+
+預計做出Portfolio Optimization的效果
