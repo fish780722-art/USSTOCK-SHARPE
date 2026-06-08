@@ -28,7 +28,11 @@ class OptimizationResult:
 
 def parse_tickers(raw_tickers: str | Iterable[str]) -> list[str]:
     if isinstance(raw_tickers, str):
-        pieces = raw_tickers.replace("\n", ",").replace(" ", ",").split(",")
+        separators = ["\n", " ", "，", ";", "；"]
+        normalized = raw_tickers
+        for separator in separators:
+            normalized = normalized.replace(separator, ",")
+        pieces = normalized.split(",")
     else:
         pieces = list(raw_tickers)
 
@@ -80,6 +84,38 @@ def download_adjusted_prices(
     if raw.empty:
         raise PortfolioError("yfinance 未回傳價格資料，請確認 ticker 或日期區間。")
 
+    prices = _extract_close_prices(raw, tickers)
+    missing = sorted(set(tickers) - set(prices.columns))
+    if missing:
+        fallback_prices = []
+        for ticker in missing:
+            single_raw = yf.download(
+                tickers=ticker,
+                start=start_date,
+                end=end_date,
+                auto_adjust=True,
+                progress=False,
+                group_by="column",
+                threads=False,
+            )
+            if not single_raw.empty:
+                try:
+                    fallback_prices.append(_extract_close_prices(single_raw, [ticker]))
+                except PortfolioError:
+                    pass
+
+        if fallback_prices:
+            prices = pd.concat([prices, *fallback_prices], axis=1)
+            prices = prices.loc[:, ~prices.columns.duplicated()]
+
+    missing = sorted(set(tickers) - set(prices.columns))
+    if missing:
+        raise PortfolioError(f"以下 ticker 無可用價格資料：{', '.join(missing)}")
+
+    return prices[tickers].sort_index()
+
+
+def _extract_close_prices(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     if isinstance(raw.columns, pd.MultiIndex):
         if "Close" not in raw.columns.get_level_values(0):
             raise PortfolioError("下載資料缺少 adjusted close 價格欄位。")
@@ -92,22 +128,24 @@ def download_adjusted_prices(
 
     prices = prices.apply(pd.to_numeric, errors="coerce").sort_index()
     prices = prices.dropna(axis=1, how="all")
+    prices.columns = [str(column).upper() for column in prices.columns]
 
-    missing = sorted(set(tickers) - set(prices.columns))
-    if missing:
-        raise PortfolioError(f"以下 ticker 無可用價格資料：{', '.join(missing)}")
-
-    return prices[tickers]
+    rename_map = {}
+    available_by_upper = {str(column).upper(): column for column in prices.columns}
+    for ticker in tickers:
+        if ticker.upper() in available_by_upper:
+            rename_map[available_by_upper[ticker.upper()]] = ticker
+    return prices.rename(columns=rename_map)
 
 
 def prices_to_monthly_returns(prices: pd.DataFrame) -> pd.DataFrame:
     if prices.empty:
         raise PortfolioError("價格資料為空。")
 
-    clean_prices = prices.replace([np.inf, -np.inf, 0], np.nan).dropna(axis=1, how="any")
+    clean_prices = prices.replace([np.inf, -np.inf, 0], np.nan).dropna(axis=1, how="all")
     removed = sorted(set(prices.columns) - set(clean_prices.columns))
     if removed:
-        raise PortfolioError(f"以下 ticker 有缺值或無效價格，已無法納入最佳化：{', '.join(removed)}")
+        raise PortfolioError(f"以下 ticker 沒有有效價格，無法納入最佳化：{', '.join(removed)}")
 
     monthly_prices = clean_prices.resample("ME").last()
     monthly_returns = monthly_prices.pct_change().dropna(how="any")
