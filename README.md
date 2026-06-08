@@ -12,6 +12,7 @@
 - 可輸入比較大盤標的，例如 `SPY`、`QQQ`、`2330`、`0050`，並提供常見 ETF/台股模糊搜尋建議
 - 美股與台股標的可混用；台股數字代號會自動嘗試 Yahoo Finance 的 `.TW`，若失敗再嘗試 `.TWO`
 - 無價格或資料不足的 ticker 會自動忽略，並在資料品質區塊列出忽略清單與有效標的價格日期範圍
+- 大量標的或標的數大於月資料期數時，會自動使用高維穩定模式，以 shrinkage covariance 與 long-only tangency portfolio 近似最大 Sharpe 解
 - 使用 adjusted price 計算月報酬率
 - 以左右比較表輸出投組與比較標的的初始投資資金、終期投資資金、CAGR、年化報酬率、年化標準差、最大回撤、Sharpe ratio
 - 年化報酬率採 Portfolio Visualizer 的 Expected Return 口徑：月報酬率算術平均乘以 12

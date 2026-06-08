@@ -370,6 +370,10 @@ def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.S
     covariance = covariance + np.eye(monthly_returns.shape[1]) * ridge
     rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
     asset_count = monthly_returns.shape[1]
+    observation_count = monthly_returns.shape[0]
+
+    if asset_count > 150 or asset_count >= observation_count:
+        return optimize_large_universe_max_sharpe(monthly_returns, mean_returns, covariance, rf_monthly)
 
     def negative_sharpe(weights: np.ndarray) -> float:
         portfolio_mean = float(np.dot(weights, mean_returns))
@@ -426,7 +430,9 @@ def build_initial_weight_guesses(
 ) -> list[np.ndarray]:
     guesses = [np.repeat(1 / asset_count, asset_count)]
 
-    for index in range(asset_count):
+    asset_sharpe_order = np.argsort(-(mean_returns / np.sqrt(np.clip(np.diag(covariance), 1e-12, None))))
+    unit_guess_indexes = asset_sharpe_order[: min(asset_count, 25)]
+    for index in unit_guess_indexes:
         unit = np.zeros(asset_count)
         unit[index] = 1.0
         guesses.append(unit)
@@ -449,6 +455,50 @@ def build_initial_weight_guesses(
         if not any(np.allclose(clean_guess, existing, atol=1e-10) for existing in unique_guesses):
             unique_guesses.append(clean_guess)
     return unique_guesses
+
+
+def optimize_large_universe_max_sharpe(
+    monthly_returns: pd.DataFrame,
+    mean_returns: np.ndarray,
+    covariance: np.ndarray,
+    rf_monthly: float,
+) -> pd.Series:
+    excess_returns = mean_returns - rf_monthly
+    asset_count = monthly_returns.shape[1]
+
+    shrinkage_covariance = shrink_covariance(covariance, shrinkage=0.35)
+    try:
+        raw_weights = np.linalg.pinv(shrinkage_covariance, rcond=1e-8) @ excess_returns
+    except np.linalg.LinAlgError:
+        raw_weights = excess_returns / np.sqrt(np.clip(np.diag(shrinkage_covariance), 1e-12, None))
+
+    weights = np.clip(raw_weights, 0, None)
+    if not np.isfinite(weights).all() or weights.sum() <= 0:
+        volatilities = np.sqrt(np.clip(np.diag(shrinkage_covariance), 1e-12, None))
+        single_asset_scores = excess_returns / volatilities
+        best_index = int(np.nanargmax(single_asset_scores))
+        weights = np.zeros(asset_count)
+        weights[best_index] = 1.0
+    else:
+        weights = weights / weights.sum()
+
+    weights = remove_tiny_weights(weights)
+    return pd.Series(weights, index=monthly_returns.columns, name="Weight").sort_values(ascending=False)
+
+
+def shrink_covariance(covariance: np.ndarray, shrinkage: float) -> np.ndarray:
+    diagonal = np.diag(np.diag(covariance))
+    shrunk = (1 - shrinkage) * covariance + shrinkage * diagonal
+    diagonal_max = float(np.nanmax(np.diag(shrunk)))
+    ridge = max(diagonal_max, 1e-12) * 1e-6
+    return shrunk + np.eye(shrunk.shape[0]) * ridge
+
+
+def remove_tiny_weights(weights: np.ndarray, threshold: float = 1e-6) -> np.ndarray:
+    clean_weights = np.where(weights >= threshold, weights, 0.0)
+    if clean_weights.sum() <= 0:
+        return weights / weights.sum()
+    return clean_weights / clean_weights.sum()
 
 
 def calculate_portfolio_performance(
