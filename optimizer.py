@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 from typing import Iterable
 
 import numpy as np
@@ -24,23 +25,26 @@ class OptimizationResult:
     portfolio_returns: pd.Series
     equity_curve: pd.Series
     metrics: dict[str, float]
+    start_date: date
+    end_date: date
 
 
 def parse_tickers(raw_tickers: str | Iterable[str]) -> list[str]:
+    separators = ["\n", " ", "，", ";", "；"]
     if isinstance(raw_tickers, str):
-        separators = ["\n", " ", "，", ";", "；"]
-        normalized = raw_tickers
-        for separator in separators:
-            normalized = normalized.replace(separator, ",")
-        pieces = normalized.split(",")
+        pieces = [raw_tickers]
     else:
         pieces = list(raw_tickers)
 
     tickers: list[str] = []
-    for ticker in pieces:
-        clean = str(ticker).strip().upper()
-        if clean and clean not in tickers:
-            tickers.append(clean)
+    for item in pieces:
+        normalized = str(item)
+        for separator in separators:
+            normalized = normalized.replace(separator, ",")
+        for ticker in normalized.split(","):
+            clean = str(ticker).strip().upper()
+            if clean and clean not in tickers:
+                tickers.append(clean)
 
     if len(tickers) < 2:
         raise PortfolioError("請至少輸入 2 個有效 ticker，才能進行投組最佳化。")
@@ -61,6 +65,73 @@ def period_to_start_date(period_label: str, today: date | None = None) -> date:
     return date(today.year - years, today.month, today.day)
 
 
+def month_start(year: int, month: int) -> date:
+    return date(year, month, 1)
+
+
+def month_end(year: int, month: int) -> date:
+    return date(year, month, monthrange(year, month)[1])
+
+
+def shift_month(year: int, month: int, month_delta: int) -> tuple[int, int]:
+    month_index = year * 12 + month - 1 + month_delta
+    return month_index // 12, month_index % 12 + 1
+
+
+def previous_month_start(value: date) -> date:
+    year, month = shift_month(value.year, value.month, -1)
+    return month_start(year, month)
+
+
+def period_to_full_month_range(period_label: str, today: date | None = None) -> tuple[date, date]:
+    today = today or date.today()
+    years_by_label = {
+        "近一年": 1,
+        "近三年": 3,
+        "近五年": 5,
+        "近十年": 10,
+    }
+    years = years_by_label.get(period_label)
+    if years is None:
+        raise PortfolioError(f"不支援的回測期間：{period_label}")
+
+    end_year, end_month = today.year, today.month
+    start_year, start_month = shift_month(end_year, end_month, -(years * 12 - 1))
+    return month_start(start_year, start_month), month_end(end_year, end_month)
+
+
+def custom_month_range(start_year: int, start_month: int, end_year: int, end_month: int) -> tuple[date, date]:
+    start = month_start(start_year, start_month)
+    end = month_end(end_year, end_month)
+    if start > end:
+        raise PortfolioError("自訂起始月份不可晚於結束月份。")
+    return start, end
+
+
+def fetch_latest_tbill_rate(default_rate: float = 0.0368) -> tuple[float, str]:
+    try:
+        import yfinance as yf
+
+        history = yf.download(
+            tickers="^IRX",
+            period="10d",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        prices = _extract_close_prices(history, ["^IRX"])
+        latest = prices["^IRX"].dropna()
+        if latest.empty:
+            raise PortfolioError("無可用 ^IRX 資料。")
+
+        rate = float(latest.iloc[-1]) / 100
+        as_of = latest.index[-1].strftime("%Y-%m-%d")
+        return rate, f"^IRX 13 WEEK TREASURY BILL as of {as_of}"
+    except Exception:
+        return default_rate, "預設值 3.68%；無法自動取得 ^IRX"
+
+
 def download_adjusted_prices(
     tickers: list[str],
     start_date: date | datetime | str,
@@ -71,10 +142,14 @@ def download_adjusted_prices(
     except ImportError as exc:
         raise PortfolioError("缺少 yfinance 套件，請先執行 pip install -r requirements.txt。") from exc
 
+    download_end = end_date
+    if isinstance(end_date, date):
+        download_end = end_date + timedelta(days=1)
+
     raw = yf.download(
         tickers=tickers,
         start=start_date,
-        end=end_date,
+        end=download_end,
         auto_adjust=True,
         progress=False,
         group_by="column",
@@ -92,7 +167,7 @@ def download_adjusted_prices(
             single_raw = yf.download(
                 tickers=ticker,
                 start=start_date,
-                end=end_date,
+                end=download_end,
                 auto_adjust=True,
                 progress=False,
                 group_by="column",
@@ -158,6 +233,19 @@ def prices_to_monthly_returns(prices: pd.DataFrame) -> pd.DataFrame:
     return monthly_returns
 
 
+def filter_monthly_returns(
+    monthly_returns: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    start_boundary = pd.Timestamp(month_end(start_date.year, start_date.month))
+    end_boundary = pd.Timestamp(month_end(end_date.year, end_date.month))
+    filtered = monthly_returns.loc[(monthly_returns.index >= start_boundary) & (monthly_returns.index <= end_boundary)]
+    if len(filtered) < 12:
+        raise PortfolioError("指定月份範圍內月報酬率資料少於 12 期，請拉長回測期間或更換 ticker。")
+    return filtered
+
+
 def optimize_max_sharpe(monthly_returns: pd.DataFrame, rf_annual: float) -> pd.Series:
     if monthly_returns.empty:
         raise PortfolioError("月報酬率資料為空。")
@@ -208,16 +296,20 @@ def calculate_portfolio_performance(
     monthly_returns: pd.DataFrame,
     weights: pd.Series,
     rf_annual: float,
+    initial_capital: float,
 ) -> tuple[pd.Series, pd.Series, dict[str, float]]:
     aligned_returns = monthly_returns[weights.index]
     portfolio_returns = aligned_returns.mul(weights, axis=1).sum(axis=1)
-    equity_curve = (1 + portfolio_returns).cumprod()
+    equity_curve = initial_capital * (1 + portfolio_returns).cumprod()
 
     years = len(portfolio_returns) / MONTHS_PER_YEAR
-    total_return = float(equity_curve.iloc[-1] - 1)
-    cagr = float(equity_curve.iloc[-1] ** (1 / years) - 1)
+    total_return = float(equity_curve.iloc[-1] / initial_capital - 1)
+    cagr = float((equity_curve.iloc[-1] / initial_capital) ** (1 / years) - 1)
+    annual_return = float((1 + portfolio_returns.mean()) ** MONTHS_PER_YEAR - 1)
     volatility = float(portfolio_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
     rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
+    drawdown = equity_curve / equity_curve.cummax() - 1
+    max_drawdown = float(drawdown.min())
 
     if volatility <= 0 or not np.isfinite(volatility):
         sharpe = np.nan
@@ -225,8 +317,12 @@ def calculate_portfolio_performance(
         sharpe = float((portfolio_returns.mean() - rf_monthly) / portfolio_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
 
     metrics = {
+        "initial_capital": float(initial_capital),
+        "ending_capital": float(equity_curve.iloc[-1]),
         "cagr": cagr,
+        "annual_return": annual_return,
         "volatility": volatility,
+        "max_drawdown": max_drawdown,
         "sharpe": sharpe,
         "total_return": total_return,
     }
@@ -237,18 +333,32 @@ def run_optimization(
     raw_tickers: str | Iterable[str],
     period_label: str,
     rf_annual: float,
+    initial_capital: float = 100000,
     end_date: date | None = None,
+    custom_start: date | None = None,
+    custom_end: date | None = None,
 ) -> OptimizationResult:
     tickers = parse_tickers(raw_tickers)
-    end = end_date or date.today()
-    start = period_to_start_date(period_label, today=end)
-    prices = download_adjusted_prices(tickers, start_date=start, end_date=end)
-    monthly_returns = prices_to_monthly_returns(prices)
+    if initial_capital <= 0:
+        raise PortfolioError("初始投資資金必須大於 0。")
+
+    if period_label == "自訂":
+        if custom_start is None or custom_end is None:
+            raise PortfolioError("請提供自訂起訖月份。")
+        start, end = custom_start, custom_end
+    else:
+        end_reference = end_date or date.today()
+        start, end = period_to_full_month_range(period_label, today=end_reference)
+
+    download_start = previous_month_start(start)
+    prices = download_adjusted_prices(tickers, start_date=download_start, end_date=end)
+    monthly_returns = filter_monthly_returns(prices_to_monthly_returns(prices), start, end)
     weights = optimize_max_sharpe(monthly_returns, rf_annual)
     portfolio_returns, equity_curve, metrics = calculate_portfolio_performance(
         monthly_returns=monthly_returns,
         weights=weights,
         rf_annual=rf_annual,
+        initial_capital=initial_capital,
     )
     return OptimizationResult(
         weights=weights,
@@ -256,4 +366,6 @@ def run_optimization(
         portfolio_returns=portfolio_returns,
         equity_curve=equity_curve,
         metrics=metrics,
+        start_date=start,
+        end_date=end,
     )
