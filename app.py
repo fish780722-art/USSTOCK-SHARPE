@@ -63,7 +63,8 @@ def fetch_ticker_name(ticker: str) -> str:
 
 
 def is_taiwan_numeric_ticker(ticker: str) -> bool:
-    return ticker.isdigit() and 4 <= len(ticker) <= 6
+    clean = ticker.strip().upper()
+    return 4 <= len(clean) <= 6 and clean[0].isdigit() and clean.replace(".", "").isalnum()
 
 
 def fetch_taiwan_chinese_name(ticker: str) -> str:
@@ -75,6 +76,7 @@ def fetch_taiwan_name_maps() -> dict[str, str]:
     names = {
         "0050": "元大台灣50",
         "0056": "元大高股息",
+        "00631L": "元大台灣50正2",
         "006208": "富邦台50",
         "00878": "國泰永續高股息",
         "00919": "群益台灣精選高息",

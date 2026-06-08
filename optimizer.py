@@ -126,9 +126,14 @@ def parse_optional_ticker(raw_ticker: str | None) -> str | None:
 
 def ticker_download_candidates(ticker: str) -> list[str]:
     clean = ticker.strip().upper()
-    if clean.isdigit() and 4 <= len(clean) <= 6:
+    if is_taiwan_ticker(clean):
         return [f"{clean}.TW", f"{clean}.TWO"]
     return [clean]
+
+
+def is_taiwan_ticker(ticker: str) -> bool:
+    clean = ticker.strip().upper()
+    return 4 <= len(clean) <= 6 and clean[0].isdigit() and clean.replace(".", "").isalnum()
 
 
 def custom_month_range(start_year: int, start_month: int, end_year: int, end_month: int) -> tuple[date, date]:
