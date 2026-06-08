@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from typing import Iterable
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -135,17 +136,7 @@ def custom_month_range(start_year: int, start_month: int, end_year: int, end_mon
 
 def fetch_latest_tbill_rate(default_rate: float = 0.0368) -> tuple[float, str]:
     try:
-        import yfinance as yf
-
-        history = yf.download(
-            tickers="^IRX",
-            period="10d",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-        )
-        prices = _extract_close_prices(history, ["^IRX"])
+        prices = fetch_yahoo_chart_prices("^IRX", date.today() - timedelta(days=30), date.today(), interval="1d")
         latest = prices["^IRX"].dropna()
         if latest.empty:
             raise PortfolioError("無可用 ^IRX 資料。")
@@ -163,8 +154,11 @@ def fetch_average_tbill_rate(
     default_rate: float = 0.0368,
 ) -> tuple[float, str]:
     try:
-        prices = download_adjusted_prices(["^IRX"], start_date=start_date, end_date=end_date)
+        prices = fetch_yahoo_chart_prices("^IRX", start_date=start_date, end_date=end_date, interval="1d")
         monthly_rates = prices["^IRX"].resample("ME").last().dropna() / 100
+        start_boundary = pd.Timestamp(month_end(start_date.year, start_date.month))
+        end_boundary = pd.Timestamp(month_end(end_date.year, end_date.month))
+        monthly_rates = monthly_rates.loc[(monthly_rates.index >= start_boundary) & (monthly_rates.index <= end_boundary)]
         if monthly_rates.empty:
             raise PortfolioError("無可用 ^IRX 月資料。")
 
@@ -174,6 +168,47 @@ def fetch_average_tbill_rate(
         return rate, f"資料來源：Yahoo Finance ^IRX 13-week T-bill，期間平均 {first_month} ~ {last_month}"
     except Exception:
         return default_rate, "資料來源：預設值 3.68%；無法自動取得回測期間平均 ^IRX"
+
+
+def fetch_yahoo_chart_prices(
+    ticker: str,
+    start_date: date,
+    end_date: date,
+    interval: str,
+) -> pd.DataFrame:
+    import requests
+
+    period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+    period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
+    encoded_ticker = quote(ticker, safe="")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_ticker}"
+    response = requests.get(
+        url,
+        params={
+            "period1": period1,
+            "period2": period2,
+            "interval": interval,
+            "events": "history",
+            "includeAdjustedClose": "true",
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        raise PortfolioError(f"Yahoo Finance chart API 未回傳 {ticker} 資料。")
+
+    item = result[0]
+    timestamps = item.get("timestamp", [])
+    closes = item.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    if not timestamps or not closes:
+        raise PortfolioError(f"Yahoo Finance chart API 缺少 {ticker} close 資料。")
+
+    index = pd.to_datetime(timestamps, unit="s").tz_localize("UTC").tz_convert(None)
+    prices = pd.DataFrame({ticker: pd.to_numeric(pd.Series(closes), errors="coerce").to_numpy()}, index=index)
+    return prices.dropna(how="all")
 
 
 def download_adjusted_prices(
