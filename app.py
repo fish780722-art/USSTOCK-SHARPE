@@ -137,6 +137,19 @@ def build_monthly_returns_table(result) -> pd.DataFrame:
     return table
 
 
+def build_price_ranges_table(result) -> pd.DataFrame:
+    rows = []
+    for ticker, (start_date, end_date) in result.price_ranges.items():
+        rows.append(
+            {
+                "Ticker": ticker,
+                "有效價格起日": start_date.strftime("%Y-%m-%d"),
+                "有效價格迄日": end_date.strftime("%Y-%m-%d"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=60 * 60)
 def get_default_rf_rate(start_date, end_date) -> tuple[float, str]:
     return fetch_average_tbill_rate(start_date, end_date)
@@ -247,6 +260,17 @@ if run_button:
             hide_index=True,
             use_container_width=True,
         )
+
+        st.subheader("資料品質")
+        ignored_text = ", ".join(result.ignored_tickers) if result.ignored_tickers else "無"
+        st.caption(f"無價格或資料不足而忽略的標的：{ignored_text}")
+        price_ranges_table = build_price_ranges_table(result)
+        if not price_ranges_table.empty:
+            st.dataframe(
+                price_ranges_table,
+                hide_index=True,
+                use_container_width=True,
+            )
 
         left, right = st.columns([1, 1])
         with left:

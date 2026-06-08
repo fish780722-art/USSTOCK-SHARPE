@@ -30,6 +30,8 @@ class OptimizationResult:
     benchmark_returns: pd.Series | None
     benchmark_equity_curve: pd.Series | None
     benchmark_metrics: dict[str, float] | None
+    ignored_tickers: list[str]
+    price_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]]
     start_date: date
     end_date: date
 
@@ -275,9 +277,12 @@ def download_adjusted_prices(
 
     missing = sorted(set(tickers) - set(prices.columns))
     if missing:
-        raise PortfolioError(f"以下 ticker 無可用價格資料：{', '.join(missing)}")
+        prices = prices.drop(columns=[ticker for ticker in missing if ticker in prices.columns], errors="ignore")
+        if prices.empty:
+            raise PortfolioError(f"所有 ticker 都沒有可用價格資料：{', '.join(tickers)}")
 
-    return prices[tickers].sort_index()
+    valid_tickers = [ticker for ticker in tickers if ticker in prices.columns]
+    return prices[valid_tickers].sort_index()
 
 
 def _extract_close_prices(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
@@ -313,7 +318,7 @@ def prices_to_monthly_returns(prices: pd.DataFrame) -> pd.DataFrame:
         raise PortfolioError(f"以下 ticker 沒有有效價格，無法納入最佳化：{', '.join(removed)}")
 
     monthly_prices = clean_prices.resample("ME").last()
-    monthly_returns = monthly_prices.pct_change().dropna(how="any")
+    monthly_returns = monthly_prices.pct_change()
 
     if len(monthly_returns) < 12:
         raise PortfolioError("月報酬率資料少於 12 期，請拉長回測期間或更換 ticker。")
@@ -321,6 +326,15 @@ def prices_to_monthly_returns(prices: pd.DataFrame) -> pd.DataFrame:
         raise PortfolioError("可用 ticker 少於 2 個，無法進行投組最佳化。")
 
     return monthly_returns
+
+
+def calculate_price_ranges(prices: pd.DataFrame) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    ranges = {}
+    for ticker in prices.columns:
+        valid_prices = prices[ticker].replace([np.inf, -np.inf, 0], np.nan).dropna()
+        if not valid_prices.empty:
+            ranges[ticker] = (valid_prices.index.min(), valid_prices.index.max())
+    return ranges
 
 
 def filter_monthly_returns(
@@ -485,8 +499,25 @@ def run_optimization(
         download_tickers.append(benchmark)
 
     prices = download_adjusted_prices(download_tickers, start_date=download_start, end_date=end)
+    ignored_tickers = [ticker for ticker in download_tickers if ticker not in prices.columns]
+    price_ranges = calculate_price_ranges(prices)
+    valid_tickers = [ticker for ticker in tickers if ticker in prices.columns]
+    if len(valid_tickers) < 2:
+        ignored_text = f"；已忽略：{', '.join(ignored_tickers)}" if ignored_tickers else ""
+        raise PortfolioError(f"可用投組 ticker 少於 2 個，無法進行投組最佳化{ignored_text}。")
+
     all_monthly_returns = filter_monthly_returns(prices_to_monthly_returns(prices), start, end)
-    monthly_returns = all_monthly_returns[tickers]
+    incomplete_return_tickers = sorted(all_monthly_returns.columns[all_monthly_returns.isna().any()].tolist())
+    if incomplete_return_tickers:
+        all_monthly_returns = all_monthly_returns.drop(columns=incomplete_return_tickers)
+        ignored_tickers.extend([ticker for ticker in incomplete_return_tickers if ticker not in ignored_tickers])
+
+    valid_tickers = [ticker for ticker in valid_tickers if ticker in all_monthly_returns.columns]
+    if len(valid_tickers) < 2:
+        ignored_text = f"；已忽略：{', '.join(ignored_tickers)}" if ignored_tickers else ""
+        raise PortfolioError(f"可用投組 ticker 少於 2 個，無法進行投組最佳化{ignored_text}。")
+
+    monthly_returns = all_monthly_returns[valid_tickers]
     weights = optimize_max_sharpe(monthly_returns, rf_annual)
     portfolio_returns, equity_curve, metrics = calculate_portfolio_performance(
         monthly_returns=monthly_returns,
@@ -497,12 +528,14 @@ def run_optimization(
     benchmark_returns = None
     benchmark_equity_curve = None
     benchmark_metrics = None
-    if benchmark:
+    if benchmark and benchmark in all_monthly_returns:
         benchmark_returns, benchmark_equity_curve, benchmark_metrics = calculate_single_asset_performance(
             all_monthly_returns[benchmark],
             rf_annual=rf_annual,
             initial_capital=initial_capital,
         )
+    elif benchmark and benchmark not in ignored_tickers:
+        ignored_tickers.append(benchmark)
 
     return OptimizationResult(
         weights=weights,
@@ -514,6 +547,8 @@ def run_optimization(
         benchmark_returns=benchmark_returns,
         benchmark_equity_curve=benchmark_equity_curve,
         benchmark_metrics=benchmark_metrics,
+        ignored_tickers=ignored_tickers,
+        price_ranges=price_ranges,
         start_date=start,
         end_date=end,
     )
