@@ -25,6 +25,9 @@ class OptimizationResult:
     portfolio_returns: pd.Series
     equity_curve: pd.Series
     metrics: dict[str, float]
+    benchmark_ticker: str | None
+    benchmark_returns: pd.Series | None
+    benchmark_metrics: dict[str, float] | None
     start_date: date
     end_date: date
 
@@ -95,9 +98,23 @@ def period_to_full_month_range(period_label: str, today: date | None = None) -> 
     if years is None:
         raise PortfolioError(f"不支援的回測期間：{period_label}")
 
-    end_year, end_month = today.year, today.month
+    end_year, end_month = shift_month(today.year, today.month, -1)
     start_year, start_month = shift_month(end_year, end_month, -(years * 12 - 1))
     return month_start(start_year, start_month), month_end(end_year, end_month)
+
+
+def parse_optional_ticker(raw_ticker: str | None) -> str | None:
+    if raw_ticker is None or not raw_ticker.strip():
+        return None
+    separators = ["\n", " ", "，", ";", "；"]
+    normalized = raw_ticker
+    for separator in separators:
+        normalized = normalized.replace(separator, ",")
+    for ticker in normalized.split(","):
+        clean = ticker.strip().upper()
+        if clean:
+            return clean
+    return None
 
 
 def custom_month_range(start_year: int, start_month: int, end_year: int, end_month: int) -> tuple[date, date]:
@@ -329,6 +346,43 @@ def calculate_portfolio_performance(
     return portfolio_returns, equity_curve, metrics
 
 
+def calculate_single_asset_performance(
+    monthly_returns: pd.Series,
+    rf_annual: float,
+    initial_capital: float,
+) -> tuple[pd.Series, dict[str, float]]:
+    clean_returns = monthly_returns.dropna()
+    if len(clean_returns) < 12:
+        raise PortfolioError("比較大盤標的的月報酬率資料少於 12 期。")
+
+    equity_curve = initial_capital * (1 + clean_returns).cumprod()
+    years = len(clean_returns) / MONTHS_PER_YEAR
+    total_return = float(equity_curve.iloc[-1] / initial_capital - 1)
+    cagr = float((equity_curve.iloc[-1] / initial_capital) ** (1 / years) - 1)
+    annual_return = float((1 + clean_returns.mean()) ** MONTHS_PER_YEAR - 1)
+    volatility = float(clean_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
+    rf_monthly = (1 + rf_annual) ** (1 / MONTHS_PER_YEAR) - 1
+    drawdown = equity_curve / equity_curve.cummax() - 1
+    max_drawdown = float(drawdown.min())
+
+    if volatility <= 0 or not np.isfinite(volatility):
+        sharpe = np.nan
+    else:
+        sharpe = float((clean_returns.mean() - rf_monthly) / clean_returns.std(ddof=1) * np.sqrt(MONTHS_PER_YEAR))
+
+    metrics = {
+        "initial_capital": float(initial_capital),
+        "ending_capital": float(equity_curve.iloc[-1]),
+        "cagr": cagr,
+        "annual_return": annual_return,
+        "volatility": volatility,
+        "max_drawdown": max_drawdown,
+        "sharpe": sharpe,
+        "total_return": total_return,
+    }
+    return clean_returns, metrics
+
+
 def run_optimization(
     raw_tickers: str | Iterable[str],
     period_label: str,
@@ -337,8 +391,10 @@ def run_optimization(
     end_date: date | None = None,
     custom_start: date | None = None,
     custom_end: date | None = None,
+    benchmark_ticker: str | None = "SPY",
 ) -> OptimizationResult:
     tickers = parse_tickers(raw_tickers)
+    benchmark = parse_optional_ticker(benchmark_ticker)
     if initial_capital <= 0:
         raise PortfolioError("初始投資資金必須大於 0。")
 
@@ -351,8 +407,13 @@ def run_optimization(
         start, end = period_to_full_month_range(period_label, today=end_reference)
 
     download_start = previous_month_start(start)
-    prices = download_adjusted_prices(tickers, start_date=download_start, end_date=end)
-    monthly_returns = filter_monthly_returns(prices_to_monthly_returns(prices), start, end)
+    download_tickers = list(tickers)
+    if benchmark and benchmark not in download_tickers:
+        download_tickers.append(benchmark)
+
+    prices = download_adjusted_prices(download_tickers, start_date=download_start, end_date=end)
+    all_monthly_returns = filter_monthly_returns(prices_to_monthly_returns(prices), start, end)
+    monthly_returns = all_monthly_returns[tickers]
     weights = optimize_max_sharpe(monthly_returns, rf_annual)
     portfolio_returns, equity_curve, metrics = calculate_portfolio_performance(
         monthly_returns=monthly_returns,
@@ -360,12 +421,24 @@ def run_optimization(
         rf_annual=rf_annual,
         initial_capital=initial_capital,
     )
+    benchmark_returns = None
+    benchmark_metrics = None
+    if benchmark:
+        benchmark_returns, benchmark_metrics = calculate_single_asset_performance(
+            all_monthly_returns[benchmark],
+            rf_annual=rf_annual,
+            initial_capital=initial_capital,
+        )
+
     return OptimizationResult(
         weights=weights,
         monthly_returns=monthly_returns,
         portfolio_returns=portfolio_returns,
         equity_curve=equity_curve,
         metrics=metrics,
+        benchmark_ticker=benchmark,
+        benchmark_returns=benchmark_returns,
+        benchmark_metrics=benchmark_metrics,
         start_date=start,
         end_date=end,
     )

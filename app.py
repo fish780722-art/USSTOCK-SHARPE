@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from difflib import get_close_matches
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -29,6 +31,44 @@ def build_weights_table(weights: pd.Series) -> pd.DataFrame:
     return table
 
 
+COMMON_BENCHMARKS = [
+    "SPY",
+    "VOO",
+    "IVV",
+    "QQQ",
+    "DIA",
+    "IWM",
+    "VTI",
+    "VT",
+    "ACWI",
+    "VEA",
+    "VWO",
+    "XLK",
+    "XLF",
+    "XLV",
+    "XLY",
+]
+
+
+def benchmark_suggestions(query: str) -> list[str]:
+    clean = query.strip().upper()
+    if not clean:
+        return COMMON_BENCHMARKS[:8]
+    prefix_matches = [ticker for ticker in COMMON_BENCHMARKS if ticker.startswith(clean)]
+    fuzzy_matches = get_close_matches(clean, COMMON_BENCHMARKS, n=8, cutoff=0.2)
+    suggestions = []
+    for ticker in [*prefix_matches, *fuzzy_matches]:
+        if ticker not in suggestions:
+            suggestions.append(ticker)
+    if clean and clean not in suggestions:
+        suggestions.insert(0, clean)
+    return suggestions[:8]
+
+
+def format_money(value: float) -> str:
+    return f"${value:,.0f}"
+
+
 def parse_uploaded_tickers(uploaded_file) -> list[str]:
     if uploaded_file is None:
         return []
@@ -54,6 +94,41 @@ def negative_red_style(value: float) -> str:
     return ""
 
 
+def build_analysis_table(result) -> pd.DataFrame:
+    rows = [
+        ("[投組] 初始投資資金", format_money(result.metrics["initial_capital"])),
+        ("[投組] 終期投資資金", format_money(result.metrics["ending_capital"])),
+        ("[投組] CAGR", format_percent(result.metrics["cagr"])),
+        ("[投組] 年化報酬率", format_percent(result.metrics["annual_return"])),
+        ("[投組] 年化標準差", format_percent(result.metrics["volatility"])),
+        ("[投組] 最大回撤 %", format_percent(result.metrics["max_drawdown"])),
+        ("[投組] SHARPE 指數", f"{result.metrics['sharpe']:.2f}"),
+    ]
+    if result.benchmark_ticker and result.benchmark_metrics:
+        rows.extend(
+            [
+                (f"[{result.benchmark_ticker}] 初始投資資金", format_money(result.benchmark_metrics["initial_capital"])),
+                (f"[{result.benchmark_ticker}] 終期投資資金", format_money(result.benchmark_metrics["ending_capital"])),
+                (f"[{result.benchmark_ticker}] CAGR", format_percent(result.benchmark_metrics["cagr"])),
+                (f"[{result.benchmark_ticker}] 年化報酬率", format_percent(result.benchmark_metrics["annual_return"])),
+                (f"[{result.benchmark_ticker}] 年化標準差", format_percent(result.benchmark_metrics["volatility"])),
+                (f"[{result.benchmark_ticker}] 最大回撤 %", format_percent(result.benchmark_metrics["max_drawdown"])),
+                (f"[{result.benchmark_ticker}] SHARPE 指數", f"{result.benchmark_metrics['sharpe']:.2f}"),
+            ]
+        )
+    return pd.DataFrame(rows, columns=["名稱", "數據"])
+
+
+def build_monthly_returns_table(result) -> pd.DataFrame:
+    table = result.monthly_returns.copy()
+    table.insert(0, "投組", result.portfolio_returns)
+    if result.benchmark_ticker and result.benchmark_returns is not None:
+        table[result.benchmark_ticker] = result.benchmark_returns
+    table.index = table.index.strftime("%Y-%m")
+    table.index.name = "月份"
+    return table
+
+
 @st.cache_data(ttl=60 * 60)
 def get_default_rf_rate() -> tuple[float, str]:
     return fetch_latest_tbill_rate()
@@ -75,6 +150,19 @@ with st.sidebar:
         type=["csv"],
         help="可上傳含 ticker/symbol 欄位的 CSV；若沒有這些欄位，會讀取第一欄。",
     )
+    benchmark_query = st.text_input(
+        "比較大盤標的",
+        value="SPY",
+        help="例如 SPY、QQQ、VTI；可自行輸入 ticker。",
+    )
+    suggestions = benchmark_suggestions(benchmark_query)
+    benchmark_choice = benchmark_query.strip().upper()
+    if suggestions:
+        benchmark_choice = st.selectbox(
+            "模糊搜尋建議",
+            options=suggestions,
+            index=0 if benchmark_query.strip().upper() not in suggestions else suggestions.index(benchmark_query.strip().upper()),
+        )
     period = st.selectbox(
         "回測期間",
         options=["近一年", "近三年", "近五年", "近十年", "自訂"],
@@ -130,6 +218,7 @@ if run_button:
                 initial_capital=initial_capital,
                 custom_start=custom_start,
                 custom_end=custom_end,
+                benchmark_ticker=benchmark_choice,
             )
 
         weights_table = build_weights_table(result.weights)
@@ -137,16 +226,12 @@ if run_button:
 
         st.caption(f"實際分析期間：{result.start_date:%Y-%m-%d} 到 {result.end_date:%Y-%m-%d}")
 
-        metric_cols = st.columns(4)
-        metric_cols[0].metric("初始投資資金", f"${result.metrics['initial_capital']:,.0f}")
-        metric_cols[1].metric("終期投資資金", f"${result.metrics['ending_capital']:,.0f}")
-        metric_cols[2].metric("CAGR", format_percent(result.metrics["cagr"]))
-        metric_cols[3].metric("投組 SHARPE 指數", f"{result.metrics['sharpe']:.2f}")
-
-        metric_cols = st.columns(3)
-        metric_cols[0].metric("投組年化報酬率", format_percent(result.metrics["annual_return"]))
-        metric_cols[1].metric("投組年化標準差", format_percent(result.metrics["volatility"]))
-        metric_cols[2].metric("最大回撤 %", format_percent(result.metrics["max_drawdown"]))
+        st.subheader("分析表")
+        st.dataframe(
+            build_analysis_table(result),
+            hide_index=True,
+            use_container_width=True,
+        )
 
         left, right = st.columns([1, 1])
         with left:
@@ -187,7 +272,7 @@ if run_button:
 
         with st.expander("月報酬率資料"):
             st.dataframe(
-                result.monthly_returns.style.format("{:.2%}").map(negative_red_style),
+                build_monthly_returns_table(result).style.format("{:.2%}").map(negative_red_style),
                 use_container_width=True,
             )
 
