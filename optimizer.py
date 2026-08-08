@@ -130,6 +130,8 @@ def ticker_download_candidates(ticker: str) -> list[str]:
         return [f"{clean}.TW", f"{clean}.TWO"]
     if "." in clean:
         return [clean, clean.replace(".", "-")]
+    if clean.isalpha():
+        return [clean, f"{clean}.V", f"{clean}.TO"]
     return [clean]
 
 
@@ -249,9 +251,9 @@ def download_adjusted_prices(
     )
 
     if raw.empty:
-        raise PortfolioError("yfinance 未回傳價格資料，請確認 ticker 或日期區間。")
-
-    downloaded_prices = _extract_close_prices(raw, primary_download_tickers)
+        downloaded_prices = pd.DataFrame()
+    else:
+        downloaded_prices = _extract_close_prices(raw, primary_download_tickers)
     prices = pd.DataFrame(index=downloaded_prices.index)
     for ticker, download_ticker in zip(tickers, primary_download_tickers):
         if download_ticker in downloaded_prices:
